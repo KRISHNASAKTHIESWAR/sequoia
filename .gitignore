@@ -1,1 +1,15 @@
-/venv
+# Ignore the virtual environment
+venv/
+.env
+
+# Ignore downloaded model files, checkpoints, and weights
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+.cache/
+
+# Ignore python compile files
+__pycache__/
+*.pyc
