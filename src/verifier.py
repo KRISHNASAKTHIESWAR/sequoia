@@ -94,42 +94,104 @@
 
 #v3 - KV cache
 # src/verifier.py
+# import torch
+
+# class TreeVerifier:
+#     def __init__(self, target_model):
+#         self.target = target_model
+
+#     def verify_tree(self, last_token_id, tree_tokens, past_key_values=None):
+#         """
+#         Verifies the guesses using the Target Model's KV cache.
+#         Processes ONLY the single last token to update the cache and get the next choice.
+#         """
+#         with torch.no_grad():
+#             outputs = self.target.model(
+#                 input_ids=last_token_id,
+#                 past_key_values=past_key_values,
+#                 use_cache=True
+#             )
+        
+#         # Get the Architect's true prediction for the next token
+#         architect_logits = outputs.logits[0, -1, :]
+#         architect_top_choice = torch.argmax(architect_logits)
+        
+#         # Pull out token IDs for verification logs
+#         g1_token = tree_tokens[0, 0].item()
+#         g2_token = tree_tokens[0, 1].item()
+#         actual_token = architect_top_choice.item()
+        
+#         if actual_token == g1_token:
+#             word = self.target.tokenizer.decode(g1_token)
+#             print(f"  -> Architect accepted Guess 1: '{word}'")
+#         elif actual_token == g2_token:
+#             word = self.target.tokenizer.decode(g2_token)
+#             print(f"  -> Architect accepted Guess 2: '{word}'")
+#         else:
+#             word = self.target.tokenizer.decode(actual_token)
+#             print(f"  -> Architect rejected both. Correcting to: '{word}'")
+            
+#         # Return the target's true token and its updated cache folder
+#         return architect_top_choice.unsqueeze(0).unsqueeze(0), outputs.past_key_values
+
+#v4 - KV cache cloning for depth=2 tree
+# src/verifier.py
 import torch
 
 class TreeVerifier:
     def __init__(self, target_model):
         self.target = target_model
 
-    def verify_tree(self, last_token_id, tree_tokens, past_key_values=None):
+    def verify_depth_2_tree(self, last_accepted_tokens, guess_A, guess_A_sub, guess_B, guess_B_sub, target_past):
         """
-        Verifies the guesses using the Target Model's KV cache.
-        Processes ONLY the single last token to update the cache and get the next choice.
+        Verifies depth-2 branches sequentially using a stable batch-size-1 KV cache.
         """
         with torch.no_grad():
-            outputs = self.target.model(
-                input_ids=last_token_id,
-                past_key_values=past_key_values,
-                use_cache=True
-            )
-        
-        # Get the Architect's true prediction for the next token
-        architect_logits = outputs.logits[0, -1, :]
-        architect_top_choice = torch.argmax(architect_logits)
-        
-        # Pull out token IDs for verification logs
-        g1_token = tree_tokens[0, 0].item()
-        g2_token = tree_tokens[0, 1].item()
-        actual_token = architect_top_choice.item()
-        
-        if actual_token == g1_token:
-            word = self.target.tokenizer.decode(g1_token)
-            print(f"  -> Architect accepted Guess 1: '{word}'")
-        elif actual_token == g2_token:
-            word = self.target.tokenizer.decode(g2_token)
-            print(f"  -> Architect accepted Guess 2: '{word}'")
-        else:
-            word = self.target.tokenizer.decode(actual_token)
-            print(f"  -> Architect rejected both. Correcting to: '{word}'")
+            # 1. Advance the Architect's cache with the last accepted tokens
+            outputs = self.target.model(input_ids=last_accepted_tokens, past_key_values=target_past, use_cache=True)
+            target_past_updated = outputs.past_key_values
             
-        # Return the target's true token and its updated cache folder
-        return architect_top_choice.unsqueeze(0).unsqueeze(0), outputs.past_key_values
+            # Get the true mathematical next token
+            actual_1 = torch.argmax(outputs.logits[0, -1, :]).item()
+            
+            gA, gA_sub = guess_A.item(), guess_A_sub.item()
+            gB, gB_sub = guess_B.item(), guess_B_sub.item()
+            
+            # --- EVALUATE BRANCH A ---
+            if actual_1 == gA:
+                # First token is a match! Advance cache to check the second token
+                outputs_A = self.target.model(input_ids=guess_A, past_key_values=target_past_updated, use_cache=True)
+                target_past_final = outputs_A.past_key_values
+                actual_2 = torch.argmax(outputs_A.logits[0, -1, :]).item()
+                
+                if actual_2 == gA_sub:
+                    word = self.target.tokenizer.decode([gA, gA_sub])
+                    print(f"  🔥 [Double Win] Architect accepted Path A: '{word}'")
+                    return torch.tensor([[gA, gA_sub]], device=self.target.device), target_past_final
+                else:
+                    # Speculative optimization: Even if guess 2 fails, we get the architect's correction token for free!
+                    word = self.target.tokenizer.decode([gA, actual_2])
+                    print(f"  -> [Single Win + Correction] Accepted Guess A, corrected second token to: '{word}'")
+                    return torch.tensor([[gA, actual_2]], device=self.target.device), target_past_final
+            
+            # --- EVALUATE BRANCH B ---
+            elif actual_1 == gB:
+                # First token is a match! Advance cache to check the second token
+                outputs_B = self.target.model(input_ids=guess_B, past_key_values=target_past_updated, use_cache=True)
+                target_past_final = outputs_B.past_key_values
+                actual_4 = torch.argmax(outputs_B.logits[0, -1, :]).item()
+                
+                if actual_4 == gB_sub:
+                    word = self.target.tokenizer.decode([gB, gB_sub])
+                    print(f"  🔥 [Double Win] Architect accepted Path B: '{word}'")
+                    return torch.tensor([[gB, gB_sub]], device=self.target.device), target_past_final
+                else:
+                    word = self.target.tokenizer.decode([gB, actual_4])
+                    print(f"  -> [Single Win + Correction] Accepted Guess B, corrected second token to: '{word}'")
+                    return torch.tensor([[gB, actual_4]], device=self.target.device), target_past_final
+            
+            # --- COMPLETE MISS ---
+            else:
+                word = self.target.tokenizer.decode([actual_1])
+                print(f"  -> [Miss] Speculation failed completely. Corrected to: '{word}'")
+                return torch.tensor([[actual_1]], device=self.target.device), target_past_updated
