@@ -113,6 +113,51 @@
     
 #v5 Tree sampling with temperature 
 # src/tree_builder.py
+# import torch
+# import copy
+
+# class TreeBuilder:
+#     def __init__(self, draft_model):
+#         self.draft = draft_model
+
+#     def build_depth_2_tree(self, last_accepted_tokens, draft_past, temperature=0.7):
+#         """
+#         Builds a Depth=2 cascading tree using Stochastic Sampling Without Replacement.
+#         """
+#         with torch.no_grad():
+#             outputs = self.draft.model(input_ids=last_accepted_tokens, past_key_values=draft_past, use_cache=True)
+#             draft_past_updated = outputs.past_key_values
+            
+#             # --- STOCHASTIC SAMPLING: DEPTH 1 ---
+#             next_token_logits = outputs.logits[0, -1, :]
+            
+#             # Apply Temperature to soften the probabilities (makes it creative)
+#             scaled_logits = next_token_logits / temperature
+#             probs = torch.softmax(scaled_logits, dim=-1)
+            
+#             # SEQUOIA UPGRADE: Sample 2 distinct tokens WITHOUT replacement
+#             # This guarantees Branch A and Branch B are always exploring unique ideas
+#             top_2_guesses = torch.multinomial(probs, num_samples=2, replacement=False)
+            
+#             guess_A = top_2_guesses[0].unsqueeze(0).unsqueeze(0) 
+#             guess_B = top_2_guesses[1].unsqueeze(0).unsqueeze(0) 
+            
+#             # --- STOCHASTIC SAMPLING: DEPTH 2 (Branch A) ---
+#             past_A = copy.deepcopy(draft_past_updated)
+#             outputs_A = self.draft.model(input_ids=guess_A, past_key_values=past_A, use_cache=True)
+#             probs_A = torch.softmax(outputs_A.logits[0, -1, :] / temperature, dim=-1)
+#             guess_A_sub = torch.multinomial(probs_A, num_samples=1) # Roll for next word
+            
+#             # --- STOCHASTIC SAMPLING: DEPTH 2 (Branch B) ---
+#             past_B = copy.deepcopy(draft_past_updated)
+#             outputs_B = self.draft.model(input_ids=guess_B, past_key_values=past_B, use_cache=True)
+#             probs_B = torch.softmax(outputs_B.logits[0, -1, :] / temperature, dim=-1)
+#             guess_B_sub = torch.multinomial(probs_B, num_samples=1)
+            
+#         return guess_A, guess_A_sub, guess_B, guess_B_sub, draft_past_updated
+
+#v6 dp
+# src/tree_builder.py
 import torch
 import copy
 
@@ -120,38 +165,67 @@ class TreeBuilder:
     def __init__(self, draft_model):
         self.draft = draft_model
 
-    def build_depth_2_tree(self, last_accepted_tokens, draft_past, temperature=0.7):
-        """
-        Builds a Depth=2 cascading tree using Stochastic Sampling Without Replacement.
-        """
+    def build_dynamic_tree(self, mode, last_accepted_tokens, draft_past, temperature=0.7):
+        """The Traffic Cop: Routes to the correct tree shape math."""
+        if mode == "wide":
+            return self.build_wide_tree(last_accepted_tokens, draft_past, temperature)
+        elif mode == "deep":
+            return self.build_deep_tree(last_accepted_tokens, draft_past, temperature)
+        else:
+            return self.build_balanced_tree(last_accepted_tokens, draft_past, temperature)
+
+    def build_wide_tree(self, last_accepted_tokens, draft_past, temperature):
+        """WIDTH=4, DEPTH=1: Casts a wide net of 4 alternative next words."""
         with torch.no_grad():
             outputs = self.draft.model(input_ids=last_accepted_tokens, past_key_values=draft_past, use_cache=True)
             draft_past_updated = outputs.past_key_values
             
-            # --- STOCHASTIC SAMPLING: DEPTH 1 ---
-            next_token_logits = outputs.logits[0, -1, :]
+            probs = torch.softmax(outputs.logits[0, -1, :] / temperature, dim=-1)
+            # Sample 4 distinct guesses without replacement
+            top_4_guesses = torch.multinomial(probs, num_samples=4, replacement=False)
             
-            # Apply Temperature to soften the probabilities (makes it creative)
-            scaled_logits = next_token_logits / temperature
-            probs = torch.softmax(scaled_logits, dim=-1)
+            guesses = [top_4_guesses[i].unsqueeze(0).unsqueeze(0) for i in range(4)]
             
-            # SEQUOIA UPGRADE: Sample 2 distinct tokens WITHOUT replacement
-            # This guarantees Branch A and Branch B are always exploring unique ideas
+        return guesses, draft_past_updated
+
+    def build_balanced_tree(self, last_accepted_tokens, draft_past, temperature):
+        """WIDTH=2, DEPTH=2: The balanced risk/reward tree."""
+        with torch.no_grad():
+            outputs = self.draft.model(input_ids=last_accepted_tokens, past_key_values=draft_past, use_cache=True)
+            draft_past_updated = outputs.past_key_values
+            
+            probs = torch.softmax(outputs.logits[0, -1, :] / temperature, dim=-1)
             top_2_guesses = torch.multinomial(probs, num_samples=2, replacement=False)
             
             guess_A = top_2_guesses[0].unsqueeze(0).unsqueeze(0) 
             guess_B = top_2_guesses[1].unsqueeze(0).unsqueeze(0) 
             
-            # --- STOCHASTIC SAMPLING: DEPTH 2 (Branch A) ---
             past_A = copy.deepcopy(draft_past_updated)
-            outputs_A = self.draft.model(input_ids=guess_A, past_key_values=past_A, use_cache=True)
-            probs_A = torch.softmax(outputs_A.logits[0, -1, :] / temperature, dim=-1)
-            guess_A_sub = torch.multinomial(probs_A, num_samples=1) # Roll for next word
+            out_A = self.draft.model(input_ids=guess_A, past_key_values=past_A, use_cache=True)
+            guess_A_sub = torch.multinomial(torch.softmax(out_A.logits[0, -1, :] / temperature, dim=-1), 1)
             
-            # --- STOCHASTIC SAMPLING: DEPTH 2 (Branch B) ---
             past_B = copy.deepcopy(draft_past_updated)
-            outputs_B = self.draft.model(input_ids=guess_B, past_key_values=past_B, use_cache=True)
-            probs_B = torch.softmax(outputs_B.logits[0, -1, :] / temperature, dim=-1)
-            guess_B_sub = torch.multinomial(probs_B, num_samples=1)
+            out_B = self.draft.model(input_ids=guess_B, past_key_values=past_B, use_cache=True)
+            guess_B_sub = torch.multinomial(torch.softmax(out_B.logits[0, -1, :] / temperature, dim=-1), 1)
             
-        return guess_A, guess_A_sub, guess_B, guess_B_sub, draft_past_updated
+        return (guess_A, guess_A_sub, guess_B, guess_B_sub), draft_past_updated
+
+    def build_deep_tree(self, last_accepted_tokens, draft_past, temperature):
+        """WIDTH=1, DEPTH=4: A straight line sprint into the future."""
+        with torch.no_grad():
+            outputs = self.draft.model(input_ids=last_accepted_tokens, past_key_values=draft_past, use_cache=True)
+            draft_past_updated = outputs.past_key_values
+            
+            # Predict 4 tokens in a row
+            chain = []
+            curr_past = copy.deepcopy(draft_past_updated)
+            curr_token = torch.multinomial(torch.softmax(outputs.logits[0, -1, :]/temperature, dim=-1), 1)
+            chain.append(curr_token)
+            
+            for _ in range(3):
+                out = self.draft.model(input_ids=curr_token, past_key_values=curr_past, use_cache=True)
+                curr_past = out.past_key_values
+                curr_token = torch.multinomial(torch.softmax(out.logits[0, -1, :]/temperature, dim=-1), 1)
+                chain.append(curr_token)
+                
+        return chain, draft_past_updated

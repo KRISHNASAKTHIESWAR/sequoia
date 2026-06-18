@@ -198,61 +198,148 @@
 
 #v5 Tree sampling with temperature
 # src/verifier.py
+# import torch
+
+# class TreeVerifier:
+#     def __init__(self, target_model):
+#         self.target = target_model
+
+#     def verify_depth_2_tree(self, last_accepted_tokens, guess_A, guess_A_sub, guess_B, guess_B_sub, target_past, temperature=0.7, top_k_threshold=5):
+#         """
+#         Verifies stochastic branches using Bounded Acceptance logic.
+#         """
+#         with torch.no_grad():
+#             outputs = self.target.model(input_ids=last_accepted_tokens, past_key_values=target_past, use_cache=True)
+#             target_past_updated = outputs.past_key_values
+            
+#             # Architect creates its Top-K list of acceptable creative words
+#             actual_logits_1 = outputs.logits[0, -1, :] / temperature
+#             architect_top_k_1 = torch.topk(actual_logits_1, top_k_threshold).indices.tolist()
+            
+#             gA, gA_sub = guess_A.item(), guess_A_sub.item()
+#             gB, gB_sub = guess_B.item(), guess_B_sub.item()
+            
+#             # --- EVALUATE BRANCH A ---
+#             if gA in architect_top_k_1:
+#                 outputs_A = self.target.model(input_ids=guess_A, past_key_values=target_past_updated, use_cache=True)
+#                 target_past_final = outputs_A.past_key_values
+                
+#                 # Check Depth 2
+#                 actual_logits_2 = outputs_A.logits[0, -1, :] / temperature
+#                 architect_top_k_2 = torch.topk(actual_logits_2, top_k_threshold).indices.tolist()
+                
+#                 if gA_sub in architect_top_k_2:
+#                     return torch.tensor([[gA, gA_sub]], device=self.target.device), target_past_final
+#                 else:
+#                     # Correction uses a weighted roll, not greedy!
+#                     probs = torch.softmax(actual_logits_2, dim=-1)
+#                     correction = torch.multinomial(probs, 1).item()
+#                     return torch.tensor([[gA, correction]], device=self.target.device), target_past_final
+            
+#             # --- EVALUATE BRANCH B ---
+#             elif gB in architect_top_k_1:
+#                 outputs_B = self.target.model(input_ids=guess_B, past_key_values=target_past_updated, use_cache=True)
+#                 target_past_final = outputs_B.past_key_values
+                
+#                 actual_logits_4 = outputs_B.logits[0, -1, :] / temperature
+#                 architect_top_k_4 = torch.topk(actual_logits_4, top_k_threshold).indices.tolist()
+                
+#                 if gB_sub in architect_top_k_4:
+#                     return torch.tensor([[gB, gB_sub]], device=self.target.device), target_past_final
+#                 else:
+#                     probs = torch.softmax(actual_logits_4, dim=-1)
+#                     correction = torch.multinomial(probs, 1).item()
+#                     return torch.tensor([[gB, correction]], device=self.target.device), target_past_final
+            
+#             # --- COMPLETE MISS ---
+#             else:
+#                 probs = torch.softmax(actual_logits_1, dim=-1)
+#                 correction = torch.multinomial(probs, 1).item()
+#                 return torch.tensor([[correction]], device=self.target.device), target_past_updated
+
+#v6 dp
+# src/verifier.py
 import torch
 
 class TreeVerifier:
     def __init__(self, target_model):
         self.target = target_model
 
-    def verify_depth_2_tree(self, last_accepted_tokens, guess_A, guess_A_sub, guess_B, guess_B_sub, target_past, temperature=0.7, top_k_threshold=5):
-        """
-        Verifies stochastic branches using Bounded Acceptance logic.
-        """
+    def verify_dynamic_tree(self, mode, last_accepted_tokens, tree_data, target_past, temperature=0.7, top_k=5):
+        if mode == "wide":
+            return self.verify_wide_tree(last_accepted_tokens, tree_data, target_past, temperature, top_k)
+        elif mode == "deep":
+            return self.verify_deep_tree(last_accepted_tokens, tree_data, target_past, temperature, top_k)
+        else:
+            return self.verify_balanced_tree(last_accepted_tokens, tree_data, target_past, temperature, top_k)
+
+    def verify_wide_tree(self, last_accepted_tokens, guesses, target_past, temp, top_k):
         with torch.no_grad():
             outputs = self.target.model(input_ids=last_accepted_tokens, past_key_values=target_past, use_cache=True)
             target_past_updated = outputs.past_key_values
             
-            # Architect creates its Top-K list of acceptable creative words
-            actual_logits_1 = outputs.logits[0, -1, :] / temperature
-            architect_top_k_1 = torch.topk(actual_logits_1, top_k_threshold).indices.tolist()
+            logits = outputs.logits[0, -1, :] / temp
+            architect_top_k = torch.topk(logits, top_k).indices.tolist()
             
-            gA, gA_sub = guess_A.item(), guess_A_sub.item()
-            gB, gB_sub = guess_B.item(), guess_B_sub.item()
+            # Check if ANY of the 4 wide guesses match the top-K
+            for guess in guesses:
+                if guess.item() in architect_top_k:
+                    # Win! Return the accepted guess
+                    outputs_A = self.target.model(input_ids=guess, past_key_values=target_past_updated, use_cache=True)
+                    return guess, outputs_A.past_key_values
             
-            # --- EVALUATE BRANCH A ---
-            if gA in architect_top_k_1:
-                outputs_A = self.target.model(input_ids=guess_A, past_key_values=target_past_updated, use_cache=True)
-                target_past_final = outputs_A.past_key_values
+            # Miss: Generate a correction
+            correction = torch.multinomial(torch.softmax(logits, dim=-1), 1).unsqueeze(0)
+            return correction, target_past_updated
+
+    def verify_balanced_tree(self, last_accepted_tokens, tree_data, target_past, temp, top_k):
+        # ... (PASTE YOUR EXACT PREVIOUS verify_depth_2_tree CODE HERE) ...
+        # Ensure it unzips tree_data: guess_A, guess_A_sub, guess_B, guess_B_sub = tree_data
+        guess_A, guess_A_sub, guess_B, guess_B_sub = tree_data
+        with torch.no_grad():
+            outputs = self.target.model(input_ids=last_accepted_tokens, past_key_values=target_past, use_cache=True)
+            target_past_updated = outputs.past_key_values
+            
+            logits_1 = outputs.logits[0, -1, :] / temp
+            top_k_1 = torch.topk(logits_1, top_k).indices.tolist()
+            gA, gA_sub, gB, gB_sub = guess_A.item(), guess_A_sub.item(), guess_B.item(), guess_B_sub.item()
+            
+            if gA in top_k_1:
+                out_A = self.target.model(input_ids=guess_A, past_key_values=target_past_updated, use_cache=True)
+                past_final = out_A.past_key_values
+                logits_2 = out_A.logits[0, -1, :] / temp
+                if gA_sub in torch.topk(logits_2, top_k).indices.tolist():
+                    return torch.tensor([[gA, gA_sub]], device=self.target.device), past_final
+                return torch.tensor([[gA, torch.multinomial(torch.softmax(logits_2,dim=-1),1).item()]], device=self.target.device), past_final
+            
+            elif gB in top_k_1:
+                out_B = self.target.model(input_ids=guess_B, past_key_values=target_past_updated, use_cache=True)
+                past_final = out_B.past_key_values
+                logits_4 = out_B.logits[0, -1, :] / temp
+                if gB_sub in torch.topk(logits_4, top_k).indices.tolist():
+                    return torch.tensor([[gB, gB_sub]], device=self.target.device), past_final
+                return torch.tensor([[gB, torch.multinomial(torch.softmax(logits_4,dim=-1),1).item()]], device=self.target.device), past_final
                 
-                # Check Depth 2
-                actual_logits_2 = outputs_A.logits[0, -1, :] / temperature
-                architect_top_k_2 = torch.topk(actual_logits_2, top_k_threshold).indices.tolist()
+            return torch.tensor([[torch.multinomial(torch.softmax(logits_1,dim=-1),1).item()]], device=self.target.device), target_past_updated
+
+    def verify_deep_tree(self, last_accepted_tokens, chain, target_past, temp, top_k):
+        with torch.no_grad():
+            curr_past = target_past
+            curr_input = last_accepted_tokens
+            accepted = []
+            
+            for guess in chain:
+                out = self.target.model(input_ids=curr_input, past_key_values=curr_past, use_cache=True)
+                curr_past = out.past_key_values
+                logits = out.logits[0, -1, :] / temp
                 
-                if gA_sub in architect_top_k_2:
-                    return torch.tensor([[gA, gA_sub]], device=self.target.device), target_past_final
+                if guess.item() in torch.topk(logits, top_k).indices.tolist():
+                    accepted.append(guess.item())
+                    curr_input = guess # Advance line
                 else:
-                    # Correction uses a weighted roll, not greedy!
-                    probs = torch.softmax(actual_logits_2, dim=-1)
-                    correction = torch.multinomial(probs, 1).item()
-                    return torch.tensor([[gA, correction]], device=self.target.device), target_past_final
-            
-            # --- EVALUATE BRANCH B ---
-            elif gB in architect_top_k_1:
-                outputs_B = self.target.model(input_ids=guess_B, past_key_values=target_past_updated, use_cache=True)
-                target_past_final = outputs_B.past_key_values
-                
-                actual_logits_4 = outputs_B.logits[0, -1, :] / temperature
-                architect_top_k_4 = torch.topk(actual_logits_4, top_k_threshold).indices.tolist()
-                
-                if gB_sub in architect_top_k_4:
-                    return torch.tensor([[gB, gB_sub]], device=self.target.device), target_past_final
-                else:
-                    probs = torch.softmax(actual_logits_4, dim=-1)
-                    correction = torch.multinomial(probs, 1).item()
-                    return torch.tensor([[gB, correction]], device=self.target.device), target_past_final
-            
-            # --- COMPLETE MISS ---
-            else:
-                probs = torch.softmax(actual_logits_1, dim=-1)
-                correction = torch.multinomial(probs, 1).item()
-                return torch.tensor([[correction]], device=self.target.device), target_past_updated
+                    # Chain broken. Apply correction and stop.
+                    correction = torch.multinomial(torch.softmax(logits, dim=-1), 1).item()
+                    accepted.append(correction)
+                    break
+                    
+            return torch.tensor([accepted], device=self.target.device), curr_past

@@ -147,35 +147,134 @@
 #v4 - KV cache cloning for depth=2 tree
 # main.py
 # main.py (Final Polish with Analytics)
+# import time
+# import torch
+# from src.target_model import TargetModel
+# from src.draft_model import DraftModel
+# from src.tree_builder import TreeBuilder
+# from src.verifier import TreeVerifier
+
+# def run_sequoia_depth_2():
+#     print("==================================================")
+#     print("STEP 1: LOADING MODELS INTO RAM")
+#     print("==================================================")
+#     target = TargetModel("facebook/opt-350m")  
+#     draft = DraftModel("facebook/opt-125m")    
+    
+#     tree_builder = TreeBuilder(draft)
+#     verifier = TreeVerifier(target)
+    
+#     prompt = "The future of artificial intelligence is very"
+#     print(f"\nPrompt: {prompt}")
+    
+#     input_ids = target.tokenizer(prompt, return_tensors="pt").input_ids.to(target.device)
+    
+#     print("\n==================================================")
+#     print("STEP 2: PRE-POPULATION PHASE")
+#     print("==================================================")
+#     with torch.no_grad():
+#         target_outputs = target.model(input_ids, use_cache=True)
+#         target_past = target_outputs.past_key_values
+        
+#         draft_outputs = draft.model(input_ids, use_cache=True)
+#         draft_past = draft_outputs.past_key_values
+    
+#     first_token = torch.argmax(target_outputs.logits[0, -1, :]).unsqueeze(0).unsqueeze(0)
+#     input_ids = torch.cat([input_ids, first_token], dim=-1)
+    
+#     max_new_tokens = 50
+#     tokens_generated = 1
+    
+#     # --- METRIC TRACKERS ---
+#     double_wins = 0
+#     single_wins = 0
+#     misses = 0
+#     total_steps = 0
+    
+#     print("\n==================================================")
+#     print("STEP 3: RUNNING CASCADING DEPTH=2 TREE LOOP")
+#     print("==================================================")
+#     start_time = time.time()
+    
+#     last_accepted_tokens = first_token
+    
+#     while tokens_generated < max_new_tokens:
+#         total_steps += 1
+        
+#         # A. Assistant builds guesses
+#         guess_A, guess_A_sub, guess_B, guess_B_sub, draft_past = tree_builder.build_depth_2_tree(
+#             last_accepted_tokens, draft_past
+#         )
+        
+#         # B. Architect validates guesses
+#         accepted_tokens, target_past = verifier.verify_depth_2_tree(
+#             last_accepted_tokens, guess_A, guess_A_sub, guess_B, guess_B_sub, target_past
+#         )
+        
+#         # Track statistics based on token length returned
+#         num_accepted = accepted_tokens.shape[1]
+#         if num_accepted == 2:
+#             double_wins += 1
+#         elif num_accepted == 1 and "Correction" in verifier.__class__.__name__ or num_accepted == 1:
+#             # Simple fallback counter tracking
+#             if "failed completely" in open('main.py').read(): # Placeholder logic check
+#                 pass
+        
+#         # C. Stitch tokens
+#         input_ids = torch.cat([input_ids, accepted_tokens], dim=-1)
+        
+#         tokens_generated += num_accepted
+#         last_accepted_tokens = accepted_tokens
+        
+#         print(f"     Progress: {tokens_generated}/{max_new_tokens} tokens tracked.")
+
+#     end_time = time.time()
+#     final_output = target.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    
+#     # --- CALCULATION OF METRICS ---
+#     avg_tokens_per_step = tokens_generated / total_steps
+    
+#     print("\n==================================================")
+#     print("STEP 4: FINAL RESEARCH METRICS REPORT")
+#     print("==================================================")
+#     print(f"--- Final Sequoia Output ---\n{final_output}\n")
+#     print(f"Total Alpha-Steps Taken: {total_steps}")
+#     print(f"Average Tokens Generated Per Step: {avg_tokens_per_step:.2f}x speedup capability")
+#     print(f"Wall-clock Time: {end_time - start_time:.2f} seconds")
+#     print("==================================================")
+
+# if __name__ == "__main__":
+#     run_sequoia_depth_2()
+
+#v6 dp
+
+# main.py
 import time
 import torch
+from collections import deque
 from src.target_model import TargetModel
 from src.draft_model import DraftModel
 from src.tree_builder import TreeBuilder
 from src.verifier import TreeVerifier
+from src.dp_optimizer import SequoiaDPOptimizer
 
-def run_sequoia_depth_2():
+def run_sequoia_dynamic():
     print("==================================================")
-    print("STEP 1: LOADING MODELS INTO RAM")
+    print("STEP 1: LOADING MODELS & OPTIMIZER")
     print("==================================================")
     target = TargetModel("facebook/opt-350m")  
     draft = DraftModel("facebook/opt-125m")    
     
     tree_builder = TreeBuilder(draft)
     verifier = TreeVerifier(target)
+    optimizer = SequoiaDPOptimizer(compute_budget=4)
     
     prompt = "The future of artificial intelligence is very"
-    print(f"\nPrompt: {prompt}")
-    
     input_ids = target.tokenizer(prompt, return_tensors="pt").input_ids.to(target.device)
     
-    print("\n==================================================")
-    print("STEP 2: PRE-POPULATION PHASE")
-    print("==================================================")
     with torch.no_grad():
         target_outputs = target.model(input_ids, use_cache=True)
         target_past = target_outputs.past_key_values
-        
         draft_outputs = draft.model(input_ids, use_cache=True)
         draft_past = draft_outputs.past_key_values
     
@@ -184,64 +283,55 @@ def run_sequoia_depth_2():
     
     max_new_tokens = 50
     tokens_generated = 1
-    
-    # --- METRIC TRACKERS ---
-    double_wins = 0
-    single_wins = 0
-    misses = 0
     total_steps = 0
     
+    # Track the last 10 steps of accuracy (Starts at 60% to default to Balanced)
+    accuracy_queue = deque([0.6] * 10, maxlen=10)
+    
     print("\n==================================================")
-    print("STEP 3: RUNNING CASCADING DEPTH=2 TREE LOOP")
+    print("STEP 3: AUTONOMOUS DYNAMIC PROGRAMMING LOOP")
     print("==================================================")
     start_time = time.time()
-    
     last_accepted_tokens = first_token
     
     while tokens_generated < max_new_tokens:
         total_steps += 1
         
-        # A. Assistant builds guesses
-        guess_A, guess_A_sub, guess_B, guess_B_sub, draft_past = tree_builder.build_depth_2_tree(
-            last_accepted_tokens, draft_past
-        )
+        # 1. Calculate live accuracy & ask the Optimizer for the best shape
+        current_acc = sum(accuracy_queue) / len(accuracy_queue)
+        mode = optimizer.find_optimal_shape(current_acc)
         
-        # B. Architect validates guesses
-        accepted_tokens, target_past = verifier.verify_depth_2_tree(
-            last_accepted_tokens, guess_A, guess_A_sub, guess_B, guess_B_sub, target_past
-        )
+        # 2. Route to the correct tree builder
+        tree_data, draft_past = tree_builder.build_dynamic_tree(mode, last_accepted_tokens, draft_past)
         
-        # Track statistics based on token length returned
+        # 3. Route to the correct verifier
+        accepted_tokens, target_past = verifier.verify_dynamic_tree(mode, last_accepted_tokens, tree_data, target_past)
+        
+        # 4. Process Results & Update Accuracy Queue
         num_accepted = accepted_tokens.shape[1]
-        if num_accepted == 2:
-            double_wins += 1
-        elif num_accepted == 1 and "Correction" in verifier.__class__.__name__ or num_accepted == 1:
-            # Simple fallback counter tracking
-            if "failed completely" in open('main.py').read(): # Placeholder logic check
-                pass
         
-        # C. Stitch tokens
+        # Did the Assistant get it right? (If it accepted > 1 token, or didn't just return a 1-token correction)
+        # Simple heuristic: If it squeezed out more than 1 token, it was highly accurate.
+        step_accuracy = 1.0 if num_accepted > 1 else 0.0
+        accuracy_queue.append(step_accuracy)
+        
         input_ids = torch.cat([input_ids, accepted_tokens], dim=-1)
-        
         tokens_generated += num_accepted
         last_accepted_tokens = accepted_tokens
         
-        print(f"     Progress: {tokens_generated}/{max_new_tokens} tokens tracked.")
+        print(f"[{mode.upper()}] Step {total_steps} | Accuracy: {current_acc*100:.0f}% | Tokens: {tokens_generated}/{max_new_tokens}")
 
     end_time = time.time()
     final_output = target.tokenizer.decode(input_ids[0], skip_special_tokens=True)
     
-    # --- CALCULATION OF METRICS ---
-    avg_tokens_per_step = tokens_generated / total_steps
-    
     print("\n==================================================")
     print("STEP 4: FINAL RESEARCH METRICS REPORT")
     print("==================================================")
-    print(f"--- Final Sequoia Output ---\n{final_output}\n")
-    print(f"Total Alpha-Steps Taken: {total_steps}")
-    print(f"Average Tokens Generated Per Step: {avg_tokens_per_step:.2f}x speedup capability")
-    print(f"Wall-clock Time: {end_time - start_time:.2f} seconds")
+    print(f"--- Final Output ---\n{final_output}\n")
+    print(f"Total Model Steps: {total_steps}")
+    print(f"Average Speedup Ratio: {tokens_generated / total_steps:.2f}x")
+    print(f"Execution Time: {end_time - start_time:.2f}s")
     print("==================================================")
 
 if __name__ == "__main__":
-    run_sequoia_depth_2()
+    run_sequoia_dynamic()
