@@ -9,7 +9,9 @@ venv/
 *.pth
 models/
 .cache/
+plots/
 
 # Ignore python compile files
 __pycache__/
 *.pyc
+PROJECT_DOC.md 

@@ -246,7 +246,7 @@
 # if __name__ == "__main__":
 #     run_sequoia_depth_2()
 
-#v6 dp
+#v6 dp with zipfian vocabulary pruning
 
 # main.py
 import time
@@ -258,80 +258,99 @@ from src.tree_builder import TreeBuilder
 from src.verifier import TreeVerifier
 from src.dp_optimizer import SequoiaDPOptimizer
 
-def run_sequoia_dynamic():
+def run_sequoia_interactive():
     print("==================================================")
     print("STEP 1: LOADING MODELS & OPTIMIZER")
     print("==================================================")
-    target = TargetModel("facebook/opt-350m")  
-    draft = DraftModel("facebook/opt-125m")    
+    # target = TargetModel("facebook/opt-350m")  
+    # draft = DraftModel("facebook/opt-125m", vocab_size=10000)   
+
+    # Target (Architect): 1.5 Billion parameters (Smart, Instruct-Tuned)
+    target = TargetModel("Qwen/Qwen2.5-1.5B-Instruct")  
+    
+    # Draft (Assistant): 0.5 Billion parameters (Fast, Instruct-Tuned)
+    # We keep vocab_size=10000 for your Zipfian Pruning!
+    draft = DraftModel("Qwen/Qwen2.5-0.5B-Instruct", vocab_size=10000) 
     
     tree_builder = TreeBuilder(draft)
     verifier = TreeVerifier(target)
     optimizer = SequoiaDPOptimizer(compute_budget=4)
     
-    prompt = "The future of artificial intelligence is very"
-    input_ids = target.tokenizer(prompt, return_tensors="pt").input_ids.to(target.device)
-    
-    with torch.no_grad():
-        target_outputs = target.model(input_ids, use_cache=True)
-        target_past = target_outputs.past_key_values
-        draft_outputs = draft.model(input_ids, use_cache=True)
-        draft_past = draft_outputs.past_key_values
-    
-    first_token = torch.argmax(target_outputs.logits[0, -1, :]).unsqueeze(0).unsqueeze(0)
-    input_ids = torch.cat([input_ids, first_token], dim=-1)
-    
-    max_new_tokens = 50
-    tokens_generated = 1
-    total_steps = 0
-    
-    # Track the last 10 steps of accuracy (Starts at 60% to default to Balanced)
-    accuracy_queue = deque([0.6] * 10, maxlen=10)
-    
     print("\n==================================================")
-    print("STEP 3: AUTONOMOUS DYNAMIC PROGRAMMING LOOP")
+    print("SYSTEM READY. TYPE 'exit' TO QUIT.")
     print("==================================================")
-    start_time = time.time()
-    last_accepted_tokens = first_token
     
-    while tokens_generated < max_new_tokens:
-        total_steps += 1
+    # --- INTERACTIVE PROMPT LOOP ---
+    while True:
+        try:
+            prompt = input("\n[USER]: ")
+            if prompt.lower() in ["exit", "quit", "stop"]:
+                print("Exiting Sequoia Engine. Goodbye!")
+                break
+            if not prompt.strip():
+                continue
+                
+        except KeyboardInterrupt:
+            # Safely catch Ctrl+C
+            print("\nExiting Sequoia Engine. Goodbye!")
+            break
+            
+        print("[SEQUOIA]: Generating...")
         
-        # 1. Calculate live accuracy & ask the Optimizer for the best shape
-        current_acc = sum(accuracy_queue) / len(accuracy_queue)
-        mode = optimizer.find_optimal_shape(current_acc)
+    
+        formatted_prompt = f"Question: {prompt}\nAnswer:"
         
-        # 2. Route to the correct tree builder
-        tree_data, draft_past = tree_builder.build_dynamic_tree(mode, last_accepted_tokens, draft_past)
+        # Tokenize the wrapped prompt instead of the raw user text
+        input_ids = target.tokenizer(formatted_prompt, return_tensors="pt").input_ids.to(target.device)
         
-        # 3. Route to the correct verifier
-        accepted_tokens, target_past = verifier.verify_dynamic_tree(mode, last_accepted_tokens, tree_data, target_past)
+        # Pre-population Phase
+        with torch.no_grad():
+            target_outputs = target.model(input_ids, use_cache=True)
+            target_past = target_outputs.past_key_values
+            draft_outputs = draft.model(input_ids, use_cache=True)
+            draft_past = draft_outputs.past_key_values
         
-        # 4. Process Results & Update Accuracy Queue
-        num_accepted = accepted_tokens.shape[1]
+        first_token = torch.argmax(target_outputs.logits[0, -1, :]).unsqueeze(0).unsqueeze(0)
+        input_ids = torch.cat([input_ids, first_token], dim=-1)
         
-        # Did the Assistant get it right? (If it accepted > 1 token, or didn't just return a 1-token correction)
-        # Simple heuristic: If it squeezed out more than 1 token, it was highly accurate.
-        step_accuracy = 1.0 if num_accepted > 1 else 0.0
-        accuracy_queue.append(step_accuracy)
+        # Reset generation trackers for the new prompt
+        max_new_tokens = 50
+        tokens_generated = 1
+        total_steps = 0
+        accuracy_queue = deque([0.6] * 10, maxlen=10)
         
-        input_ids = torch.cat([input_ids, accepted_tokens], dim=-1)
-        tokens_generated += num_accepted
-        last_accepted_tokens = accepted_tokens
+        start_time = time.time()
+        last_accepted_tokens = first_token
         
-        print(f"[{mode.upper()}] Step {total_steps} | Accuracy: {current_acc*100:.0f}% | Tokens: {tokens_generated}/{max_new_tokens}")
+        # The Dynamic Tree Loop
+        while tokens_generated < max_new_tokens:
+            total_steps += 1
+            
+            current_acc = sum(accuracy_queue) / len(accuracy_queue)
+            mode = optimizer.find_optimal_shape(current_acc)
+            
+            tree_data, draft_past = tree_builder.build_dynamic_tree(mode, last_accepted_tokens, draft_past)
+            accepted_tokens, target_past = verifier.verify_dynamic_tree(mode, last_accepted_tokens, tree_data, target_past)
+            
+            num_accepted = accepted_tokens.shape[1]
+            step_accuracy = 1.0 if num_accepted > 1 else 0.0
+            accuracy_queue.append(step_accuracy)
+            
+            input_ids = torch.cat([input_ids, accepted_tokens], dim=-1)
+            tokens_generated += num_accepted
+            last_accepted_tokens = accepted_tokens
+            
+            # Print intermediate progress (Optional: You can comment this out for a cleaner UI)
+            # print(f"[{mode.upper()}] Step {total_steps} | Accuracy: {current_acc*100:.0f}% | Tokens: {tokens_generated}/{max_new_tokens}")
 
-    end_time = time.time()
-    final_output = target.tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    
-    print("\n==================================================")
-    print("STEP 4: FINAL RESEARCH METRICS REPORT")
-    print("==================================================")
-    print(f"--- Final Output ---\n{final_output}\n")
-    print(f"Total Model Steps: {total_steps}")
-    print(f"Average Speedup Ratio: {tokens_generated / total_steps:.2f}x")
-    print(f"Execution Time: {end_time - start_time:.2f}s")
-    print("==================================================")
+        end_time = time.time()
+        final_output = target.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        
+        # Print the final generated block with its metrics
+        print(f"\n{final_output}")
+        print("-" * 50)
+        print(f"Metrics: {total_steps} steps | Speedup: {tokens_generated / total_steps:.2f}x | Time: {end_time - start_time:.2f}s")
+        print("-" * 50)
 
 if __name__ == "__main__":
-    run_sequoia_dynamic()
+    run_sequoia_interactive()
